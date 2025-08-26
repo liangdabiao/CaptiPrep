@@ -110,6 +110,26 @@
 
 Note: API keys & model vendor (OpenAI, Claude, Gemini, or OpenAI‑compatible) are configured locally on the Options page and stored only on your machine.
 
+
 ## ❤️ Acknowledgments
 Subtitle extraction groundwork inspired by / thanks to:
 https://github.com/devhims/youtube-caption-extractor
+
+
+## ☕️Sponsorship
+
+### Buy me a coffee if you enjoy CaptiPrep～ 🩵❤️🧡🩷💛💚
+
+<table>
+  <tr>
+    <td align="center">
+      <img src="https://github.com/user-attachments/assets/cb4fc3c9-ef68-4acb-8c32-232876364a62" alt="IMG_0035" width="300" />
+      <br><sub>Wechat/微信</sub>
+    </td>
+    <td align="center">
+      <img src="https://github.com/user-attachments/assets/e9111d96-3fa4-4b79-bcf0-0dfa6a67705f" alt="IMG_0033" width="300" />
+      <br><sub>Alipay/支付宝</sub>
+    </td>
+  </tr>
+</table>
+
