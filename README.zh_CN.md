@@ -116,3 +116,20 @@
 I wouldn’t have been able to extract YouTube subtitles without this project. Thank you 🙏
 
 https://github.com/devhims/youtube-caption-extractor
+
+## ☕️ 支持 CaptiPrep
+
+### 如果你喜欢 CaptiPrep，欢迎请我喝杯咖啡～ ☕️ 🩵❤️🧡🩷💛💚
+
+<table>
+  <tr>
+    <td align="center">
+      <img src="https://github.com/user-attachments/assets/cb4fc3c9-ef68-4acb-8c32-232876364a62" alt="微信赞助" width="300" />
+      <br><sub>WeChat / 微信</sub>
+    </td>
+    <td align="center">
+      <img src="https://github.com/user-attachments/assets/e9111d96-3fa4-4b79-bcf0-0dfa6a67705f" alt="支付宝赞助" width="300" />
+      <br><sub>Alipay / 支付宝</sub>
+    </td>
+  </tr>
+</table>

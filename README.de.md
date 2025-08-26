@@ -45,3 +45,20 @@ Hinweis: API-Keys & Modellwahl (OpenAI, Claude, Gemini, kompatible) lokal in den
 ## ❤️ Danksagung
 Untertitel-Extraktion basiert u.a. auf:
 https://github.com/devhims/youtube-caption-extractor
+
+## ☕️ CaptiPrep unterstützen
+
+### Hilft dir das Tool? Dann halt es mit einem Kaffee am Laufen ☕️ 🩵❤️🧡🩷💛💚
+
+<table>
+  <tr>
+    <td align="center">
+      <img src="https://github.com/user-attachments/assets/cb4fc3c9-ef68-4acb-8c32-232876364a62" alt="WeChat" width="300" />
+      <br><sub>WeChat</sub>
+    </td>
+    <td align="center">
+      <img src="https://github.com/user-attachments/assets/e9111d96-3fa4-4b79-bcf0-0dfa6a67705f" alt="Alipay" width="300" />
+      <br><sub>Alipay</sub>
+    </td>
+  </tr>
+</table>

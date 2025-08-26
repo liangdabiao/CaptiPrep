@@ -45,3 +45,20 @@
 ## ❤️ 감사
 자막 추출 참고 프로젝트:
 https://github.com/devhims/youtube-caption-extractor
+
+## ☕️ CaptiPrep 응원하기
+
+### 도움이 되었다면 작은 커피 한 잔으로 개발에 힘을 실어 주세요 ☕️ 🩵❤️🧡🩷💛💚
+
+<table>
+  <tr>
+    <td align="center">
+      <img src="https://github.com/user-attachments/assets/cb4fc3c9-ef68-4acb-8c32-232876364a62" alt="WeChat" width="300" />
+      <br><sub>WeChat</sub>
+    </td>
+    <td align="center">
+      <img src="https://github.com/user-attachments/assets/e9111d96-3fa4-4b79-bcf0-0dfa6a67705f" alt="Alipay" width="300" />
+      <br><sub>Alipay</sub>
+    </td>
+  </tr>
+</table>
