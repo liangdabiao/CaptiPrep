@@ -8,7 +8,11 @@ function t(k, ...subs) {
       return s;
     }
   } catch {}
-  return (chrome.i18n && chrome.i18n.getMessage ? chrome.i18n.getMessage(k, subs) : '') || k;
+  try {
+    return (chrome.i18n && chrome.i18n.getMessage ? chrome.i18n.getMessage(k, subs) : '') || k;
+  } catch {
+    return k;
+  }
 }
 function applyI18nPlaceholders(root) {
   try {
@@ -38,6 +42,9 @@ function applyI18nPlaceholders(root) {
     });
   } catch {}
 }
+
+// Speaker icon for TTS buttons (same style as other inline SVGs)
+var SPEAK_ICON = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M19 5a9 9 0 0 1 0 14"/></svg>';
 
 // Backend facade
 // Avoid duplicate const redeclare when UI script is injected twice
@@ -93,6 +100,7 @@ function closeModal() {
   modalOpen = false;
   if (uiRoot) uiRoot.style.display = 'none';
   resumePausedVideos();
+  stopSpeech();
   // stop background polling when panel is closed
   try { if (buildWatchTimer) { clearInterval(buildWatchTimer); buildWatchTimer = null; } } catch {}
   try { if (selectWatchTimer) { clearInterval(selectWatchTimer); selectWatchTimer = null; } } catch {}
@@ -160,6 +168,8 @@ async function createUI() {
   uiRoot.querySelector('#cc-settings')?.addEventListener('click', () => chrome.runtime.sendMessage({ type: 'CC_OPEN_OPTIONS' }));
   uiRoot.querySelector('#cc-regenerate')?.addEventListener('click', () => startFlow(true));
   uiRoot.querySelector('#cc-export')?.addEventListener('click', exportCSV);
+  // TTS speak buttons (event delegation; content re-renders often)
+  bindCardSpeak(uiRoot.querySelector('#cc-content'));
   uiRoot.querySelector('#cc-toggleview')?.addEventListener('click', () => {
     ccGridMode = !ccGridMode;
     ccEditMode = false;
@@ -539,7 +549,7 @@ async function startFlow(forceRegenerate = false) {
             }
           } catch {}
           const sampled = sampleTranscript(currentState.subtitlesText, 12000);
-          const resp = await B.llmCall('first', { subtitlesText: sampled, captionLang: currentState.captionLang, maxItems: 60 });
+          const resp = await B.llmCall('first', { subtitlesText: sampled, captionLang: currentState.captionLang, maxItems: 20 });
           currentState.candidates = resp.items || [];
           await B.saveVideoData(currentState.videoId, { candidates: currentState.candidates, selecting: false });
         } catch (e) {
@@ -595,7 +605,7 @@ async function startFlow(forceRegenerate = false) {
   try {
     await B.saveVideoData(currentState.videoId, { selecting: true });
     const sampled = sampleTranscript(currentState.subtitlesText, 12000);
-    const resp = await B.llmCall('first', { subtitlesText: sampled, captionLang: currentState.captionLang, maxItems: 60 });
+    const resp = await B.llmCall('first', { subtitlesText: sampled, captionLang: currentState.captionLang, maxItems: 20 });
     currentState.candidates = resp.items || [];
     await B.saveVideoData(currentState.videoId, { candidates: currentState.candidates, selecting: false });
   } catch (e) {
@@ -765,7 +775,7 @@ function renderSelection() {
       ${items.map((it, idx) => `
         <label class="cc-cand-item">
           <input type="checkbox" id="cc-cb-${idx}" data-idx="${idx}" ${it.selected? 'checked':''}/>
-          <div><b>${escapeHtml(it.term)}</b> <span class="cc-small">(${escapeHtml(it.type||'word')}, freq ${it.freq ?? '-'})</span></div>
+          <div><b>${escapeHtml(it.term)}</b> <span class="cc-small">(${escapeHtml(it.type||'word')})</span></div>
         </label>
       `).join('')}
     </div>
@@ -895,6 +905,7 @@ function renderLearnView() {
   `;
 
   const doRender = () => {
+    stopSpeech();
     content.innerHTML = ccGridMode ? renderGrid() : renderBig();
     if (ccGridMode) {
       Array.from(content.querySelectorAll('.cc-card')).forEach((el, i) => {
@@ -916,9 +927,11 @@ function renderCardView(card) {
   const c = { term: '', ipa: '', pos: '', definition: '', examples: [], notes: '', ...card };
   const pron = formatPronunciationMeta(c, currentState.captionLang);
   const examplesHtml = renderExamplesQuoteEx(c.examples || []);
+  const lang = normalizeLang(currentState.captionLang);
+  const termSpeak = c.term ? `<button type="button" class="cc-speak" data-tts="term" data-lang="${escapeAttr(lang)}" title="${t('action_speak')}" aria-label="${t('action_speak')}">${SPEAK_ICON}</button>` : '';
   return `
     <div class="cc-view">
-      <div class="term">${escapeHtml(c.term)}</div>
+      <div class="term">${escapeHtml(c.term)}${termSpeak}</div>
       <div class="meta">${pron ? `${pron}` : ''} ${c.pos ? `· ${escapeHtml(c.pos)}` : ''}</div>
       <div class="definition">${escapeHtml(c.definition||'')}</div>
       ${examplesHtml}
@@ -1030,13 +1043,92 @@ function formatPronunciationMeta(card, captionLang) {
 // Enhanced examples renderer supporting pronunciation line for non-English sources
 function renderExamplesQuoteEx(list) {
   if (!list || !list.length) return '';
-  const blocks = list.slice(0, 2).map(raw => {
+  const lang = normalizeLang(currentState.captionLang);
+  const blocks = list.slice(0, 2).map((raw, i) => {
     const lines = String(raw).split(/\r?\n/).map(s => s.trim()).filter(Boolean);
     const l1 = lines[0] || '';
     const l2 = lines[1] || '';
-    return `<blockquote><div>${escapeHtml(l1)}</div>${l2 ? `<div class="cc-small">${escapeHtml(l2)}</div>` : ''}</blockquote>`;
+    const speak = l1 ? `<button type="button" class="cc-speak cc-speak-sm" data-tts="ex" data-idx="${i}" data-lang="${escapeAttr(lang)}" title="${t('action_speak')}" aria-label="${t('action_speak')}">${SPEAK_ICON}</button>` : '';
+    return `<blockquote><div class="cc-ex-l1"><span class="cc-ex-txt">${escapeHtml(l1)}</span>${speak}</div>${l2 ? `<div class="cc-small">${escapeHtml(l2)}</div>` : ''}</blockquote>`;
   }).join('');
   return `<div class="examples-quote">${blocks}</div>`;
+}
+
+// ===== TTS: browser speech synthesis integration =====
+var __ttsPromise = typeof __ttsPromise !== 'undefined' ? __ttsPromise : null;
+var __speakBtn = typeof __speakBtn !== 'undefined' ? __speakBtn : null;
+function ensureTTS() {
+  // tts.js is loaded as a content script (isolated world) via manifest,
+  // so globalThis.CC_TTS is always available here. A dynamic <script> tag would
+  // run in the MAIN world and be invisible to this isolated world, so we do not use it.
+  if (globalThis.CC_TTS) return Promise.resolve(globalThis.CC_TTS);
+  if (__ttsPromise) return __ttsPromise;
+  __ttsPromise = new Promise((resolve) => {
+    try {
+      const s = document.createElement('script');
+      s.src = chrome.runtime.getURL('assets/tts.js');
+      s.onload = () => resolve(globalThis.CC_TTS || null);
+      s.onerror = () => resolve(null);
+      (document.head || document.documentElement).appendChild(s);
+      setTimeout(() => resolve(globalThis.CC_TTS || null), 2000);
+    } catch { resolve(null); }
+  });
+  return __ttsPromise;
+}
+function setSpeakBtn(btn, on) {
+  if (!btn) return;
+  try { btn.classList.toggle('cc-speaking', !!on); } catch {}
+}
+function stopSpeech() {
+  if (globalThis.CC_TTS) { try { globalThis.CC_TTS.stop(); } catch {} }
+  if (__speakBtn) { setSpeakBtn(__speakBtn, false); __speakBtn = null; }
+}
+async function speakFromButton(btn) {
+  await ensureTTS();
+  const tts = globalThis.CC_TTS;
+  if (!tts || !btn) return;
+  const card = (currentState.cards || [])[currentCardIndex] || {};
+  let text = '';
+  if (btn.dataset && btn.dataset.tts === 'term') {
+    text = card.term || '';
+  } else {
+    const ex = (card.examples) || [];
+    const raw = ex[Number((btn.dataset && btn.dataset.idx) || 0)] || '';
+    text = String(raw).split(/\r?\n/).map(s => s.trim()).filter(Boolean)[0] || '';
+  }
+  if (!text) return;
+  // Toggle off if the same button is already speaking
+  if (tts.isSpeaking() && __speakBtn === btn) {
+    tts.stop(); setSpeakBtn(btn, false); __speakBtn = null; return;
+  }
+  tts.stop();
+  if (__speakBtn && __speakBtn !== btn) setSpeakBtn(__speakBtn, false);
+  __speakBtn = btn;
+  setSpeakBtn(btn, true);
+  try {
+    const settings = await B.getSettings();
+    const accent = (settings && settings.accent) || 'us';
+    await tts.speak(text, {
+      lang: (btn.dataset && btn.dataset.lang) || '',
+      accent,
+      rate: 0.9,
+      onEnd: () => { setSpeakBtn(btn, false); if (__speakBtn === btn) __speakBtn = null; },
+      onError: () => { setSpeakBtn(btn, false); if (__speakBtn === btn) __speakBtn = null; }
+    });
+  } catch {
+    setSpeakBtn(btn, false);
+    if (__speakBtn === btn) __speakBtn = null;
+  }
+}
+function bindCardSpeak(root) {
+  if (!root) return;
+  root.addEventListener('click', (e) => {
+    const btn = e.target && e.target.closest ? e.target.closest('[data-tts]') : null;
+    if (!btn) return;
+    e.preventDefault();
+    e.stopPropagation();
+    speakFromButton(btn);
+  });
 }
 
 async function deleteAllForThisVideo() {

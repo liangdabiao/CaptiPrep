@@ -54,6 +54,88 @@ async function cleanupStorage() {
   } catch {}
 }
 
+// ===== YouTube subtitle extraction: keyless multi-client InnerTube fallback =====
+// Ported from youtube-caption-extractor. YouTube rejects old client fingerprints
+// globally; when this path stops working, bump clientVersion/UA below to current
+// values (track yt-dlp's recent commits).
+const YT_CLIENT_PROFILES = [
+  {
+    name: 'ios',
+    clientName: 'IOS',
+    clientVersion: '20.10.4',
+    clientNameHeader: '5',
+    userAgent: 'com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)',
+    context: { deviceMake: 'Apple', deviceModel: 'iPhone16,2', platform: 'MOBILE', osName: 'iOS', osVersion: '18.3.2.22D82' }
+  },
+  {
+    name: 'android_vr',
+    clientName: 'ANDROID_VR',
+    clientVersion: '1.62.20',
+    clientNameHeader: '28',
+    userAgent: 'com.google.android.apps.youtube.vr.oculus/1.62.20 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip',
+    context: { deviceMake: 'Oculus', deviceModel: 'Quest 3', platform: 'MOBILE', osName: 'Android', osVersion: '12L', androidSdkVersion: 32 }
+  },
+  {
+    name: 'mweb',
+    clientName: 'MWEB',
+    clientVersion: '2.20251209.01.00',
+    clientNameHeader: '2',
+    userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1',
+    context: { platform: 'MOBILE', osName: 'iOS', osVersion: '17.5.1' }
+  }
+];
+
+// Keyless InnerTube /player call that tries every client and returns the first
+// response that has captionTracks. Does NOT bail on a single client's ERROR
+// status (YouTube reuses ERROR for both "video unavailable" and "client too old").
+async function fetchPlayerDirect(videoId) {
+  const failures = [];
+  for (const c of YT_CLIENT_PROFILES) {
+    try {
+      const body = {
+        context: {
+          client: { clientName: c.clientName, clientVersion: c.clientVersion, hl: 'en', gl: 'US', ...c.context },
+          user: { lockedSafetyMode: false },
+          request: { useSsl: true }
+        },
+        videoId,
+        contentCheckOk: true,
+        racyCheckOk: true
+      };
+      const res = await fetch('https://youtubei.googleapis.com/youtubei/v1/player?prettyPrint=false', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: '*/*',
+          'User-Agent': c.userAgent,
+          'X-YouTube-Client-Name': c.clientNameHeader,
+          'X-YouTube-Client-Version': c.clientVersion,
+          Origin: 'https://www.youtube.com'
+        },
+        body: JSON.stringify(body)
+      });
+      if (!res.ok) {
+        failures.push(`${c.name}: http ${res.status}`);
+        continue;
+      }
+      const data = await res.json();
+      const st = data && data.playabilityStatus && data.playabilityStatus.status;
+      if (st && st !== 'OK') {
+        failures.push(`${c.name}: ${st}`);
+        continue;
+      }
+      const tracks = data && data.captions && data.captions.playerCaptionsTracklistRenderer && data.captions.playerCaptionsTracklistRenderer.captionTracks;
+      if (Array.isArray(tracks) && tracks.length) {
+        return { tracks, error: null };
+      }
+      failures.push(`${c.name}: OK but no caption tracks`);
+    } catch (e) {
+      failures.push(`${c.name}: ${e && e.message || e}`);
+    }
+  }
+  return { tracks: [], error: failures.join(' | ') };
+}
+
 // Open modal in the active tab when the action is clicked
 chrome.action.onClicked.addListener(async (tab) => {
   if (!tab.id) return;
@@ -62,7 +144,7 @@ chrome.action.onClicked.addListener(async (tab) => {
   } catch (e) {
     // Content scripts may not be injected yet (e.g., initial load). Inject both UI and backend.
     try {
-      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js', 'ui.js'] });
+      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js', 'assets/tts.js', 'ui.js'] });
       await chrome.tabs.sendMessage(tab.id, { type: 'CC_TOGGLE_MODAL' });
     } catch (err) {
       console.error('Failed to open modal:', err);
@@ -151,6 +233,22 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     })();
     return true;
   }
+  if (msg && msg.type === 'CC_YT_PLAYER_DIRECT') {
+    (async () => {
+      try {
+        const videoId = String(msg.videoId || '').trim();
+        if (!videoId) {
+          sendResponse({ ok: false, tracks: [], error: 'missing videoId' });
+          return;
+        }
+        const { tracks, error } = await fetchPlayerDirect(videoId);
+        sendResponse({ ok: tracks.length > 0, tracks, error });
+      } catch (e) {
+        sendResponse({ ok: false, tracks: [], error: String(e && e.message || e) });
+      }
+    })();
+    return true;
+  }
 });
 
 async function handleLLMCall(payload) {
@@ -172,14 +270,26 @@ async function handleLLMCall(payload) {
   // Lower temperature to reduce hallucination in definition/example stage
   const temperature = role === 'first' ? 0 : 0.0;
   const topP = 1;
+  const baseMaxTokens = role === 'first' ? 4096 : 16384;
 
-  const text = await callProvider({ provider, baseUrl, apiKey, model, prompt: prompts.prompt, temperature, topP });
-  // Expect JSON in text; try to parse
-  let parsed;
-  try {
-    const jsonStr = extractJson(text);
-    parsed = JSON.parse(jsonStr);
-  } catch (e) {
+  // Try up to 2 times: bounded output cap first; on empty/invalid-JSON retry without a cap
+  // (some models/gateways return empty or truncated output when max_tokens is set)
+  let text = '';
+  let parsed = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    text = await callProvider({ provider, baseUrl, apiKey, model, prompt: prompts.prompt, temperature, topP, maxTokens: attempt === 0 ? baseMaxTokens : undefined });
+    if (!text || !String(text).trim()) continue; // empty -> retry
+    try {
+      parsed = JSON.parse(extractJson(text));
+      break;
+    } catch (e) {
+      if (attempt === 0) continue; // invalid JSON -> retry once with relaxed cap
+    }
+  }
+  if (!parsed) {
+    if (!text || !String(text).trim()) {
+      throw new Error('LLM returned empty content. Check your API key, model and quota (retried once).');
+    }
     throw new Error('LLM returned non-JSON or invalid JSON. Raw: ' + truncate(text, 800));
   }
   // Post-processing
@@ -205,7 +315,7 @@ async function handleLLMCall(payload) {
 function buildPrompts(role, data, opts) {
   const { accent, glossLang } = (opts || {});
   if (role === 'first') {
-    const { subtitlesText, captionLang, maxItems = 60 } = data;
+    const { subtitlesText, captionLang, maxItems = 20 } = data;
     const langHint = captionLang && typeof captionLang === 'string' && captionLang.trim() ? captionLang : 'auto-detect';
     const system = `You are an expert segmenter and vocabulary curator. Work only within the detected source language (source: ${langHint}). Extract learnable units that maximize pedagogical value for a learner.`;
 
@@ -224,16 +334,15 @@ function buildPrompts(role, data, opts) {
 
 Return JSON strictly with this shape:
 {
-  "items": [ { "term": string, "type": "word"|"phrase", "freq": number } ]
+  "items": [ { "term": string, "type": "word"|"phrase" } ]
 }
 Selection rules:
 - Evidence: Include a term only if the exact string occurs in the transcript. For Latin/Cyrillic scripts, match case-insensitively on whole word/phrase boundaries; for CJK/Korean, substring match is acceptable.
-- Utility ranking: Rank by teaching value within THIS transcript: semantic density > idiomaticity/collocation > local frequency. Avoid very rare named entities unless broadly useful.
+- Learnability (most important): This tool is for VOCABULARY LEARNING. Prefer genuinely valuable new words, advanced words, idioms, collocations and hard-to-guess phrases. Skip ordinary everyday basic vocabulary a learner almost certainly already knows (e.g. en: have/people/time/thing/come; ja: 見る/行く/もの/こと; zh: 看/说/好/想; ko: 가다/하다/것/수). Ranking: novelty/difficulty for a learner > semantic density > idiomaticity/collocation > local frequency.
 - Multiword expressions: Prefer if idiomatic or hard to translate literally.
 - Morphology: Do NOT rewrite to lemmas in output. Keep surface form in "term". Internally, you may consider lemma for ranking but NOT for output.
 - Stop items: Avoid common fillers/backchannels and bare function words. Examples — en: uh/um/like/you know; ja: えっと/あの/まあ; ko: 어/음/그냥/막; ru: ну/типа/как бы; fr: euh/bah/ben/du coup; de: äh/ähm/also; es: eh/pues/bueno/o sea; zh: 嗯/啊/就是/然后。 Only include them if part of a fixed expression with content.
 - Cross-language noise: Exclude brand names, gamer tags, hashtags, model numbers, timestamps, and English borrowings unless they are widely lexicalized in the source language.
-- freq is a rough integer count/weight in this transcript.
 - Limit items to about ${maxItems}.
 - Language gate: ${langGate}
 - If uncertain, return an empty list rather than guessing.
@@ -528,9 +637,7 @@ function postProcessCandidates(parsed, subtitlesText, captionLang, maxItems) {
     for (const it of items) {
       const k = norm(it.term);
       if (!k) continue;
-      const prev = mergedMap.get(k);
-      if (!prev) mergedMap.set(k, { term: it.term, type: it.type || 'word', freq: it.freq || 1 });
-      else prev.freq = (prev.freq || 1) + (it.freq || 1);
+      if (!mergedMap.has(k)) mergedMap.set(k, { term: it.term, type: it.type || 'word' });
     }
     const merged = Array.from(mergedMap.values());
 
@@ -538,8 +645,7 @@ function postProcessCandidates(parsed, subtitlesText, captionLang, maxItems) {
       .filter(it => contains(String(it.term || '').trim()))
       .filter(it => !isStop(it.term))
       .filter(it => scriptOk(it.term));
-    // Optional: cap length again and sort by provided freq desc
-    filtered.sort((a, b) => (b.freq || 0) - (a.freq || 0));
+    // Keep the LLM's pedagogical order; do NOT re-sort by freq (removed).
     let finalList = typeof maxItems === 'number' ? filtered.slice(0, maxItems) : filtered;
 
     // Fallback: if filtering wipes out everything (e.g., model lemmatized/rewrote terms), degrade constraints to avoid empty UI
@@ -555,7 +661,6 @@ function postProcessCandidates(parsed, subtitlesText, captionLang, maxItems) {
         .filter(it => looseContains(String(it.term || '')))
         .filter(it => !isStop(it.term))
         .filter(it => scriptOk(it.term));
-      minimal.sort((a, b) => (b.freq || 0) - (a.freq || 0));
       finalList = typeof maxItems === 'number' ? minimal.slice(0, maxItems) : minimal;
     }
 
@@ -684,7 +789,7 @@ function inferLangFromSelected(selected) {
   } catch { return 'und'; }
 }
 
-function buildNaiveCandidatesFromTranscript(text, lang, maxItems = 60) {
+function buildNaiveCandidatesFromTranscript(text, lang, maxItems = 20) {
   try {
     const s = String(text || '');
     if (!s.trim()) return [];
@@ -712,11 +817,11 @@ function buildNaiveCandidatesFromTranscript(text, lang, maxItems = 60) {
       const m = s.match(/[\p{L}\p{M}][\p{L}\p{M}'-]*/gu) || [];
       m.filter(x => x.length >= 3).forEach(push);
     }
-    // Build items sorted by frequency
-    const items = Array.from(freq.entries())
-      .map(([term, count]) => ({ term, type: 'word', freq: count }))
-      .sort((a, b) => (b.freq || 0) - (a.freq || 0));
-    return items.slice(0, Math.max(10, Math.min(80, maxItems || 60)));
+    // Build items sorted by frequency (freq kept internal only, not in output)
+    const ranked = Array.from(freq.entries())
+      .sort((a, b) => b[1] - a[1])
+      .map(([term]) => ({ term, type: 'word' }));
+    return ranked.slice(0, Math.max(10, Math.min(80, maxItems || 20)));
   } catch { return []; }
 }
 
@@ -736,7 +841,7 @@ function buildStoplist(lang) {
   }
 }
 
-async function callProvider({ provider, baseUrl, apiKey, model, prompt, temperature, topP }) {
+async function callProvider({ provider, baseUrl, apiKey, model, prompt, temperature, topP, maxTokens }) {
   const p = provider.toLowerCase();
   if (p === 'gemini' || p === 'google') {
     const url = (baseUrl && baseUrl.trim()) || `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
@@ -744,7 +849,8 @@ async function callProvider({ provider, baseUrl, apiKey, model, prompt, temperat
       contents: [ { role: 'user', parts: [ { text: prompt } ] } ],
       generationConfig: {
         temperature: typeof temperature === 'number' ? temperature : undefined,
-        topP: typeof topP === 'number' ? topP : undefined
+        topP: typeof topP === 'number' ? topP : undefined,
+        maxOutputTokens: typeof maxTokens === 'number' ? maxTokens : undefined
       }
     };
     const res = await fetch(url, {
@@ -772,7 +878,8 @@ async function callProvider({ provider, baseUrl, apiKey, model, prompt, temperat
           { role: 'user', content: prompt }
         ],
         temperature: typeof temperature === 'number' ? temperature : undefined,
-        top_p: typeof topP === 'number' ? topP : undefined
+        top_p: typeof topP === 'number' ? topP : undefined,
+        max_tokens: typeof maxTokens === 'number' ? maxTokens : undefined
       })
     });
     if (!res.ok) throw new Error(`OpenAI error ${res.status}: ${await res.text()}`);
@@ -790,7 +897,7 @@ async function callProvider({ provider, baseUrl, apiKey, model, prompt, temperat
       },
       body: JSON.stringify({
         model,
-        max_tokens: 2048,
+        max_tokens: typeof maxTokens === 'number' ? maxTokens : 2048,
         temperature: typeof temperature === 'number' ? temperature : undefined,
         top_p: typeof topP === 'number' ? topP : undefined,
         messages: [ { role: 'user', content: prompt } ]
@@ -813,7 +920,8 @@ async function callProvider({ provider, baseUrl, apiKey, model, prompt, temperat
         model,
         messages: [ { role: 'user', content: prompt } ],
         temperature: typeof temperature === 'number' ? temperature : undefined,
-        top_p: typeof topP === 'number' ? topP : undefined
+        top_p: typeof topP === 'number' ? topP : undefined,
+        max_tokens: typeof maxTokens === 'number' ? maxTokens : undefined
       })
     });
     if (!res.ok) throw new Error(`OpenRouter error ${res.status}: ${await res.text()}`);

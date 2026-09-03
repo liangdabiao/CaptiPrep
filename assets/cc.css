@@ -146,3 +146,12 @@
 .cc-card.cc-loading { padding: 14px 16px; }
 .cc-loading { min-height: 0; display:flex; align-items:center; gap:10px; }
 .cc-card.cc-loading .cc-spinner { width:14px; height:14px; border-width:2px; }
+/* TTS speak buttons */
+.cc-speak{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;margin-left:6px;padding:0;border:2px solid #000;background:#fff;color:#000;border-radius:50%;cursor:pointer;vertical-align:middle;box-shadow:2px 2px 0 #000;flex:none;transition:transform .12s ease,box-shadow .12s ease,background .12s ease,color .12s ease;}
+.cc-speak:hover{transform:translate(1px,1px);box-shadow:1px 1px 0 #000;}
+.cc-speak:active{transform:translate(2px,2px);box-shadow:0 0 0 #000;}
+.cc-speak.cc-speaking{background:#000;color:#fff;animation:cc-speak-pulse .5s ease-in-out infinite alternate;}
+.cc-speak-sm{width:19px;height:19px;}
+.cc-ex-l1{display:flex;align-items:flex-start;gap:5px;}
+.cc-ex-txt{flex:1;}
+@keyframes cc-speak-pulse{from{opacity:1;transform:scale(1);}to{opacity:.55;transform:scale(.82);}}

@@ -142,7 +142,7 @@ function ytApiPostMainWorld(endpoint, payload, opts = {}) {
     setTimeout(() => {
       try { window.removeEventListener('message', onMsg); } catch {}
       resolve({ ok: false, status: 0, contentType: '', json: null, text: '', error: 'timeout' });
-    }, 10000);
+    }, 5000);
   });
 }
 
@@ -165,7 +165,7 @@ function fetchCaptionMainWorld(url) {
     setTimeout(() => {
       try { window.removeEventListener('message', onMsg); } catch {}
       resolve({ ok: false, status: 0, contentType: '', text: '', error: 'timeout' });
-    }, 10000);
+    }, 5000);
   });
 }
 
@@ -188,7 +188,7 @@ function getSelectedCaptionTrackMainWorld() {
     setTimeout(() => {
       try { window.removeEventListener('message', onMsg); } catch {}
       resolve(null);
-    }, 3000);
+    }, 1500);
   });
 }
 
@@ -409,6 +409,29 @@ async function extractCaptionsText() {
 
   const { videoId } = getYouTubeVideoInfo();
   if (!videoId) throw new Error(window.t('error_no_video'));
+
+  // 3) Fallback: keyless multi-client InnerTube /player (background, independent of page state)
+  try {
+    const prRes = await chrome.runtime.sendMessage({ type: 'CC_YT_PLAYER_DIRECT', videoId });
+    const tracks = (prRes && Array.isArray(prRes.tracks)) ? prRes.tracks : [];
+    if (tracks.length) {
+      const selected = await getSelectedCaptionTrackMainWorld();
+      const pick = chooseDefaultTrack(tracks, selected);
+      if (pick && pick.baseUrl) {
+        const base = pick.baseUrl;
+        const finalLang = pick.languageCode || 'und';
+        for (const fmt of ['json3','srv3','vtt']) {
+          try {
+            const text = await fetchAndExtract(buildUrlWithFmt(base, fmt));
+            if (text && text.trim()) return { text, lang: finalLang };
+          } catch {}
+        }
+      }
+    } else {
+      dlog('Direct InnerTube fallback failed:', prRes && prRes.error);
+    }
+  } catch (e) { dlog('Direct InnerTube fallback error:', e?.message || e); }
+
   throw new Error(window.t('error_no_captions'));
 }
 

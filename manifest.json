@@ -29,6 +29,7 @@
     "https://www.youtube.com/*",
     "https://*.youtube.com/*",
     "https://*.googlevideo.com/*",
+    "https://youtubei.googleapis.com/*",
     "https://api.openai.com/*",
     "https://api.anthropic.com/*",
     "https://openrouter.ai/*",
@@ -44,7 +45,7 @@
   "content_scripts": [
     {
       "matches": ["https://*.youtube.com/*", "https://youtu.be/*"],
-      "js": ["content.js", "ui.js"],
+      "js": ["content.js", "assets/tts.js", "ui.js"],
       "run_at": "document_idle"
     }
   ],

@@ -3,12 +3,18 @@
 const CC_NS = 'CCAPTIPREPS';
 let __i18nDict = null;
 function t(k, ...subs) {
-  if (__i18nDict && __i18nDict[k]) {
-    let s = __i18nDict[k];
-    if (subs && subs.length) subs.forEach((v, i) => { s = s.replace(new RegExp('\\$' + (i + 1), 'g'), String(v)); });
-    return s;
+  try {
+    if (__i18nDict && __i18nDict[k]) {
+      let s = __i18nDict[k];
+      if (subs && subs.length) subs.forEach((v, i) => { s = s.replace(new RegExp('\\$' + (i + 1), 'g'), String(v)); });
+      return s;
+    }
+  } catch {}
+  try {
+    return (chrome.i18n && chrome.i18n.getMessage ? chrome.i18n.getMessage(k, subs) : '') || k;
+  } catch {
+    return k;
   }
-  return (chrome.i18n && chrome.i18n.getMessage ? chrome.i18n.getMessage(k, subs) : '') || k;
 }
 function applyI18nPlaceholders(root = document) {
   const getMsg = (raw) => {
@@ -38,6 +44,64 @@ function applyI18nPlaceholders(root = document) {
 }
 const KEY_VIDEOS = `${CC_NS}:video:`; // prefix
 const KEY_FAV_VIDEOS = `${CC_NS}:fav:videos`;
+
+// ===== TTS: browser speech synthesis (wordbook) =====
+const SPEAK_ICON = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M19 5a9 9 0 0 1 0 14"/></svg>';
+let __wbSpeakBtn = null;
+function wbEnsureTTS() {
+  if (globalThis.CC_TTS) return Promise.resolve(globalThis.CC_TTS);
+  return new Promise((resolve) => {
+    try {
+      const s = document.createElement('script');
+      s.src = chrome.runtime.getURL('assets/tts.js');
+      s.onload = () => resolve(globalThis.CC_TTS || null);
+      s.onerror = () => resolve(null);
+      (document.head || document.documentElement).appendChild(s);
+      setTimeout(() => resolve(globalThis.CC_TTS || null), 2000);
+    } catch { resolve(null); }
+  });
+}
+function setWbBtn(btn, on) {
+  if (!btn) return;
+  try { btn.classList.toggle('cc-speaking', !!on); } catch {}
+}
+async function wbSpeakFromButton(btn) {
+  const tts = await wbEnsureTTS();
+  if (!tts || !btn || !btn.dataset) return;
+  const text = btn.dataset.text || '';
+  if (!text) return;
+  if (tts.isSpeaking() && __wbSpeakBtn === btn) {
+    tts.stop(); setWbBtn(btn, false); __wbSpeakBtn = null; return;
+  }
+  tts.stop();
+  if (__wbSpeakBtn && __wbSpeakBtn !== btn) setWbBtn(__wbSpeakBtn, false);
+  __wbSpeakBtn = btn;
+  setWbBtn(btn, true);
+  try {
+    let accent = 'us';
+    try {
+      const o = await chrome.storage.local.get('settings');
+      accent = (o.settings && o.settings.accent) || 'us';
+    } catch {}
+    await tts.speak(text, {
+      lang: tts.detectLang(text),
+      accent,
+      rate: 0.9,
+      onEnd: () => { setWbBtn(btn, false); if (__wbSpeakBtn === btn) __wbSpeakBtn = null; },
+      onError: () => { setWbBtn(btn, false); if (__wbSpeakBtn === btn) __wbSpeakBtn = null; }
+    });
+  } catch {
+    setWbBtn(btn, false);
+    if (__wbSpeakBtn === btn) __wbSpeakBtn = null;
+  }
+}
+document.addEventListener('click', (e) => {
+  const btn = e.target && e.target.closest ? e.target.closest('[data-tts]') : null;
+  if (!btn) return;
+  e.preventDefault();
+  e.stopPropagation();
+  wbSpeakFromButton(btn);
+});
 const KEY_FAV_WORDS = `${CC_NS}:fav:words`;
 
 const el = (sel) => document.querySelector(sel);
@@ -547,14 +611,17 @@ function bindStorageListeners(){
 function renderCardView(card) {
   const c = { term: '', ipa: '', pos: '', definition: '', examples: [], notes: '', ...card };
   const ipa = (c.ipa||'').replace(/^\/+|\/+$/g, '');
+  const speakLabel = t('action_speak');
+  const termSpeak = c.term ? `<button type="button" class="cc-speak" data-tts="term" data-text="${escapeAttr(c.term)}" title="${speakLabel}" aria-label="${speakLabel}">${SPEAK_ICON}</button>` : '';
   const ex = (c.examples||[]).slice(0,2).map(raw => {
     const lines = String(raw).split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
     const en = lines[0]||''; const zh = lines[1]||'';
-    return `<blockquote><div>${escapeHtml(en)}</div>${zh?`<div class="cc-small">${escapeHtml(zh)}</div>`:''}</blockquote>`;
+    const sp = en ? `<button type="button" class="cc-speak cc-speak-sm" data-tts="ex" data-text="${escapeAttr(en)}" title="${speakLabel}" aria-label="${speakLabel}">${SPEAK_ICON}</button>` : '';
+    return `<blockquote><div class="cc-ex-l1"><span class="cc-ex-txt">${escapeHtml(en)}</span>${sp}</div>${zh?`<div class="cc-small">${escapeHtml(zh)}</div>`:''}</blockquote>`;
   }).join('');
   return `
     <div class="cc-view">
-      <div class="term">${escapeHtml(c.term)}</div>
+      <div class="term">${escapeHtml(c.term)}${termSpeak}</div>
       <div class="meta">${ipa?`/${escapeHtml(ipa)}/`:''} ${c.pos?`· ${escapeHtml(c.pos)}`:''}</div>
       <div class="definition">${escapeHtml(c.definition||'')}</div>
       ${ex?`<div class="examples-quote">${ex}</div>`:''}
