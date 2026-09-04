@@ -23,7 +23,8 @@
   "permissions": [
     "storage",
     "scripting",
-    "activeTab"
+    "activeTab",
+    "contextMenus"
   ],
   "host_permissions": [
     "https://www.youtube.com/*",
@@ -44,8 +45,16 @@
   "options_page": "options/index.html",
   "content_scripts": [
     {
-      "matches": ["https://*.youtube.com/*", "https://youtu.be/*"],
-      "js": ["content.js", "assets/tts.js", "ui.js"],
+      "matches": [
+        "https://*.youtube.com/*",
+        "https://youtu.be/*"
+      ],
+      "js": [
+        "assets/capture.js",
+        "content.js",
+        "assets/tts.js",
+        "ui.js"
+      ],
       "run_at": "document_idle"
     }
   ],
@@ -59,8 +68,7 @@
         "icons/*"
       ],
       "matches": [
-        "https://*.youtube.com/*",
-        "https://youtu.be/*"
+        "<all_urls>"
       ]
     }
   ]

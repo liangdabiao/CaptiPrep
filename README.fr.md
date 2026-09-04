@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
- <a href="README.md">English</a> | <a href="README.zh_CN.md">简体中文</a> | <a href="README.es.md">Español</a> | <b>Français</b> | <a href="README.de.md">Deutsch</a> | <a href="README.ja.md">日本語</a> | <a href="README.ko.md">한국어</a> | <a href="README.ru.md">Русский</a>
+ <a href="README.en.md">English</a> | <a href="README.md">简体中文</a> | <a href="README.es.md">Español</a> | <b>Français</b> | <a href="README.de.md">Deutsch</a> | <a href="README.ja.md">日本語</a> | <a href="README.ko.md">한국어</a> | <a href="README.ru.md">Русский</a>
 </p>
 
 <p align="center"><em>Anticipez le vocabulaire clé d'une vidéo YouTube, puis visionnez-la avec une compréhension plus fluide et durable.</em></p>

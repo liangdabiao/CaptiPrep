@@ -105,7 +105,19 @@
   "wordbook_toolbar_export": "Export",
   "wordbook_none_fav_words": "No favorite words yet",
   "alt_cover": "cover",
-  "export_favorites_prefix": "favorites"
-,
-  "action_speak": "Speak"
+  "export_favorites_prefix": "favorites",
+  "action_speak": "Speak",
+  "action_new_content": "New content",
+  "new_content_title": "New learning content",
+  "new_content_desc": "Paste any text below to create study cards from it.",
+  "new_content_title_ph": "Title (optional)",
+  "new_content_text_ph": "Paste text here…",
+  "new_content_go": "Start",
+  "new_content_empty": "Please paste some text first.",
+  "btn_cancel": "Cancel",
+  "src_all": "All",
+  "src_youtube": "Video",
+  "src_article": "Article",
+  "src_selection": "Selection",
+  "src_manual": "Manual"
 }

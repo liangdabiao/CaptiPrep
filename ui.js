@@ -51,6 +51,30 @@ var SPEAK_ICON = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" st
 // eslint-disable-next-line no-var
 var B = (typeof B !== 'undefined' && B) || (globalThis.CaptiPrep && globalThis.CaptiPrep.backend) || {};
 
+// 通用化：统一持久化抽象。非 YouTube 内容 → content:*，YouTube → video:*（向后兼容）
+function isContentMode() {
+  return !!currentState.sourceType && currentState.sourceType !== 'youtube';
+}
+function saveState(patch) {
+  if (isContentMode()) return B.saveContentData(currentState.contentId, patch);
+  return B.saveVideoData(currentState.videoId, patch);
+}
+function loadState() {
+  if (isContentMode()) return B.loadContentData(currentState.contentId);
+  return B.loadVideoData(currentState.videoId);
+}
+function updateSourceBadge() {
+  try {
+    const el = uiRoot && uiRoot.querySelector('#cc-source-badge');
+    if (!el) return;
+    const map = { youtube: 'YT', article: 'ART', selection: 'SEL', manual: 'MAN' };
+    const label = map[currentState.sourceType] || '';
+    el.textContent = label;
+    el.style.display = label ? 'inline-block' : 'none';
+    el.title = currentState.sourceType || '';
+  } catch {}
+}
+
 // Simple UI state
 // Use var so re-injection doesn't throw on redeclare
 var modalOpen = typeof modalOpen !== 'undefined' ? modalOpen : false;
@@ -60,6 +84,8 @@ var selectWatchTimer = typeof selectWatchTimer !== 'undefined' ? selectWatchTime
 var navWatchTimer = typeof navWatchTimer !== 'undefined' ? navWatchTimer : null; // watch YouTube SPA navigation for videoId changes
 var currentState = typeof currentState !== 'undefined' ? currentState : {
   videoId: null,
+  contentId: null,
+  sourceType: null,
   title: null,
   subtitlesText: null,
   captionLang: null,
@@ -73,12 +99,27 @@ var currentState = typeof currentState !== 'undefined' ? currentState : {
 var ccGridMode = typeof ccGridMode !== 'undefined' ? ccGridMode : false; // 是否网格视图
 var ccEditMode = typeof ccEditMode !== 'undefined' ? ccEditMode : false; // 是否编辑模式（大卡片）
 var currentCardIndex = typeof currentCardIndex !== 'undefined' ? currentCardIndex : 0; // 当前卡索引
+var pendingSourceType = typeof pendingSourceType !== 'undefined' ? pendingSourceType : null; // CC_OPEN_MODAL 待消费来源
 // 记录由插件暂停的 video 元素，便于关闭面板时恢复播放
 var __ccPausedVideos = (typeof __ccPausedVideos !== 'undefined') ? __ccPausedVideos : new Set();
 
 // 入口消息（负责 UI 开关）
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg && msg.type === 'CC_TOGGLE_MODAL') toggleModal();
+  // 通用化：后台/右键菜单注入后，按来源打开（用 pendingSourceType 交给 bootFlow 消费，避免重复流程）
+  if (msg && msg.type === 'CC_OPEN_MODAL' && msg.payload) {
+    const st = msg.payload.sourceType || null;
+    const wasOpen = modalOpen;
+    pendingSourceType = st;
+    if (!wasOpen) {
+      openModal();
+    } else {
+      if (uiRoot) uiRoot.style.display = 'block';
+      pendingSourceType = null;
+      if (st && st !== 'youtube') startContentFlow(st);
+      else if (st === 'youtube') startFlow(true);
+    }
+  }
 });
 
 function toggleModal() {
@@ -92,8 +133,8 @@ async function openModal() {
   pauseActiveVideo();
   try { maybeShowWhatsNew(); } catch {}
   bootFlow();
-  // Begin watching for SPA navigation after opening
-  try { startNavWatcher(); } catch {}
+  // Begin watching for SPA navigation after opening (仅 YouTube 有意义)
+  try { if (B.isYouTubePage && B.isYouTubePage(location.href)) startNavWatcher(); } catch {}
 }
 
 function closeModal() {
@@ -131,7 +172,10 @@ async function createUI() {
   // 加载 UI 模板 + 语言字典
   try {
     const htmlUrl = chrome.runtime.getURL('assets/ui.html');
-    const html = await fetch(htmlUrl).then(r => r.text());
+    const resp = await fetch(htmlUrl);
+    if (!resp.ok) throw new Error('ui.html HTTP ' + resp.status);
+    const html = await resp.text();
+    if (!html || html.indexOf('cc-step') < 0) throw new Error('ui.html 模板缺失');
     uiRoot.innerHTML = html;
     try {
       const store = await chrome.storage.local.get('settings');
@@ -143,8 +187,10 @@ async function createUI() {
       }
     } catch {}
     applyI18nPlaceholders(uiRoot);
-  } catch {
-    uiRoot.innerHTML = '<div class="cc-overlay"><div class="cc-modal"><div class="cc-body"><div id="cc-step"></div><div id="cc-content">' + t('state_failed_load_ui') + '</div></div></div></div>';
+  } catch (e) {
+    try { console.warn('[CaptiPrep] ui.html load failed', e && e.message); } catch {}
+    // 兜底模板：即使 ui.html 加载失败也保证核心元素 + 关闭按钮存在
+    uiRoot.innerHTML = '<div class="cc-overlay"><div class="cc-modal"><div class="cc-header"><div class="cc-title">CaptiPrep</div><div class="cc-actions"><button class="cc-icon" id="cc-close" aria-label="Close" title="Close">&times;</button></div></div><div class="cc-body"><div id="cc-step"></div><div id="cc-content">' + t('state_failed_load_ui') + '</div></div></div></div>';
   }
 
   document.documentElement.appendChild(uiRoot);
@@ -168,6 +214,7 @@ async function createUI() {
   uiRoot.querySelector('#cc-settings')?.addEventListener('click', () => chrome.runtime.sendMessage({ type: 'CC_OPEN_OPTIONS' }));
   uiRoot.querySelector('#cc-regenerate')?.addEventListener('click', () => startFlow(true));
   uiRoot.querySelector('#cc-export')?.addEventListener('click', exportCSV);
+  uiRoot.querySelector('#cc-debuglog')?.addEventListener('click', exportLLMDebugLog);
   // TTS speak buttons (event delegation; content re-renders often)
   bindCardSpeak(uiRoot.querySelector('#cc-content'));
   uiRoot.querySelector('#cc-toggleview')?.addEventListener('click', () => {
@@ -180,6 +227,12 @@ async function createUI() {
   // 新增：单词本入口
   uiRoot.querySelector('#cc-wordbook')?.addEventListener('click', () => {
     chrome.runtime.sendMessage({ type: 'CC_OPEN_WORDBOOK' });
+  });
+  // 通用化：新建内容（手动粘贴）
+  uiRoot.querySelector('#cc-new')?.addEventListener('click', () => {
+    currentState.sourceType = 'manual';
+    currentState.contentId = null;
+    openNewContentModal();
   });
 
   // 底部控制条
@@ -210,7 +263,7 @@ async function createUI() {
     if (!cards.length) return;
     const edited = readCardEditor();
     cards[currentCardIndex] = edited;
-    await B.saveVideoData(currentState.videoId, { cards });
+    await saveState( { cards });
     ccEditMode = false;
     renderLearnView();
   });
@@ -434,8 +487,17 @@ async function bootFlow() {
     renderOnboarding();
     return;
   }
+  // 通用化：非 YouTube 页面 → 内容源流程（文章 / 划词）
+  if (typeof B.isYouTubePage === 'function' && !B.isYouTubePage(location.href)) {
+    const pst = pendingSourceType; pendingSourceType = null;
+    await startContentFlow(pst || 'auto');
+    return;
+  }
+  pendingSourceType = null;
   const { videoId, title } = B.getYouTubeVideoInfo();
   currentState.videoId = videoId;
+  currentState.sourceType = 'youtube';
+  currentState.contentId = null;
   currentState.title = title;
   const saved = await B.loadVideoData(videoId);
   if (saved && saved.cards && saved.cards.length) {
@@ -460,6 +522,93 @@ async function bootFlow() {
     return;
   }
   startFlow();
+}
+
+// ===== 通用化：内容源流程（文章 / 划词 / 手动）=====
+async function startContentFlow(sourceType, opts) {
+  try {
+    setStep([t('steps_extract'), t('steps_filter'), t('steps_build')], 1);
+    renderProgress(t('steps_extract') + '…');
+    // ① 捕获内容（auto 时由页面自动识别）
+    const resolved = (sourceType && sourceType !== 'auto') ? sourceType : (B.getCurrentSourceType ? B.getCurrentSourceType() : 'article');
+    const captured = await B.captureContent(resolved, opts || {});
+    if (!captured || !captured.text) { renderError(t('error_captions'), 'No content captured'); return; }
+    // ② 初始化状态（含来源徽标）
+    currentState.sourceType = captured.sourceType;
+    currentState.contentId = captured.id;
+    currentState.videoId = null;
+    currentState.title = captured.title || '';
+    currentState.subtitlesText = captured.text;
+    currentState.captionLang = (captured.lang && captured.lang !== 'und') ? captured.lang : null;
+    currentState.candidates = null; currentState.selected = null; currentState.cards = null; currentState.error = null;
+    updateSourceBadge();
+    const createdAt = formatDateYYYYMMDD(new Date());
+    await B.saveContentData(captured.id, {
+      sourceType: captured.sourceType, sourceUrl: captured.sourceUrl || '', title: currentState.title,
+      subtitlesText: captured.text, captionLang: currentState.captionLang, lang: captured.lang || '',
+      meta: captured.meta || {}, createdAt,
+    });
+    // ②.5 恢复已有进度（避免重复跑 LLM）
+    const prev = await B.loadContentData(captured.id);
+    if (prev && prev.cards && prev.cards.length) {
+      currentState.candidates = prev.candidates || null;
+      currentState.selected = prev.selected || null;
+      currentState.cards = prev.cards;
+      setStep([t('steps_extract'), t('steps_filter'), t('steps_build')], 3);
+      renderLearnView();
+      return;
+    }
+    if (prev && Array.isArray(prev.candidates) && prev.candidates.length) {
+      currentState.candidates = prev.candidates;
+      currentState.selected = prev.selected || null;
+      setStep([t('steps_extract'), t('steps_filter'), t('steps_build')], 2);
+      renderSelection();
+      return;
+    }
+    // ③ 筛选词汇（文章给更大采样预算，降低漏词）
+    setStep([t('steps_extract'), t('steps_filter'), t('steps_build')], 2);
+    renderProgress(t('progress_filtering'));
+    await B.saveContentData(captured.id, { selecting: true });
+    const budget = captured.sourceType === 'article' ? 30000 : 12000;
+    const sampled = sampleTranscript(captured.text, budget);
+    const resp = await llmCallTimed('first', { subtitlesText: sampled, captionLang: currentState.captionLang, maxItems: 20 });
+    currentState.candidates = resp.items || [];
+    await B.saveContentData(captured.id, { candidates: currentState.candidates, selecting: false });
+    hideCenterOverlay();
+    renderSelection();
+  } catch (e) {
+    currentState.error = String(e && e.message || e);
+    renderError(t('error_captions'), currentState.error);
+  }
+}
+
+// 手动新建内容（粘贴文本）
+function openNewContentModal() {
+  try {
+    const content = uiRoot && uiRoot.querySelector('#cc-content');
+    if (!content) return;
+    content.innerHTML =
+      '<div class="cc-card">' +
+        '<div class="cc-setup-title"><b>' + t('new_content_title') + '</b></div>' +
+        '<p class="cc-small cc-setup-desc">' + t('new_content_desc') + '</p>' +
+        '<div class="cc-controls" style="flex-direction:column;align-items:stretch;gap:8px;">' +
+          '<input id="cc-new-title" class="cc-input" placeholder="' + t('new_content_title_ph') + '" style="padding:8px;border:1px solid var(--cc-border,#ddd);border-radius:8px;"/>' +
+          '<textarea id="cc-new-text" class="cc-input" rows="8" placeholder="' + t('new_content_text_ph') + '" style="padding:8px;border:1px solid var(--cc-border,#ddd);border-radius:8px;resize:vertical;"></textarea>' +
+          '<div style="display:flex;gap:8px;justify-content:flex-end;">' +
+            '<button class="cc-btn-white" id="cc-new-cancel">' + t('btn_cancel') + '</button>' +
+            '<button class="cc-btn" id="cc-new-go">' + t('new_content_go') + '</button>' +
+          '</div>' +
+        '</div>' +
+      '</div>';
+    updateBottomControls();
+    content.querySelector('#cc-new-cancel')?.addEventListener('click', () => { openModal(); });
+    content.querySelector('#cc-new-go')?.addEventListener('click', async () => {
+      const text = (content.querySelector('#cc-new-text')?.value || '').trim();
+      const title = (content.querySelector('#cc-new-title')?.value || '').trim();
+      if (!text) { alert(t('new_content_empty')); return; }
+      await startContentFlow('manual', { text, title });
+    });
+  } catch (e) { console.warn(e); }
 }
 
 async function startFlow(forceRegenerate = false) {
@@ -539,7 +688,7 @@ async function startFlow(forceRegenerate = false) {
         currentState.captionLang = saved.captionLang || null;
         setStep([t('steps_extract'), t('steps_filter'), t('steps_build')], 2);
         renderProgress(t('progress_filtering'));
-        await B.saveVideoData(currentState.videoId, { selecting: true });
+        await saveState( { selecting: true });
         try {
           // Refresh captionLang from currently selected track as a guard
           try {
@@ -549,11 +698,11 @@ async function startFlow(forceRegenerate = false) {
             }
           } catch {}
           const sampled = sampleTranscript(currentState.subtitlesText, 12000);
-          const resp = await B.llmCall('first', { subtitlesText: sampled, captionLang: currentState.captionLang, maxItems: 20 });
+          const resp = await llmCallTimed('first', { subtitlesText: sampled, captionLang: currentState.captionLang, maxItems: 20 });
           currentState.candidates = resp.items || [];
-          await B.saveVideoData(currentState.videoId, { candidates: currentState.candidates, selecting: false });
+          await saveState( { candidates: currentState.candidates, selecting: false });
         } catch (e) {
-          await B.saveVideoData(currentState.videoId, { selecting: false });
+          await saveState( { selecting: false });
           throw e;
         }
         hideCenterOverlay();
@@ -593,7 +742,7 @@ async function startFlow(forceRegenerate = false) {
         }
       } catch {}
     }
-    await B.saveVideoData(currentState.videoId, toSave);
+    await saveState( toSave);
   } catch (e) {
     currentState.error = String(e?.message || e);
     renderError(t('error_captions'), currentState.error);
@@ -603,14 +752,14 @@ async function startFlow(forceRegenerate = false) {
   setStep([t('steps_extract'), t('steps_filter'), t('steps_build')], 2);
   renderProgress(t('progress_filtering'));
   try {
-    await B.saveVideoData(currentState.videoId, { selecting: true });
+    await saveState( { selecting: true });
     const sampled = sampleTranscript(currentState.subtitlesText, 12000);
-    const resp = await B.llmCall('first', { subtitlesText: sampled, captionLang: currentState.captionLang, maxItems: 20 });
+    const resp = await llmCallTimed('first', { subtitlesText: sampled, captionLang: currentState.captionLang, maxItems: 20 });
     currentState.candidates = resp.items || [];
-    await B.saveVideoData(currentState.videoId, { candidates: currentState.candidates, selecting: false });
+    await saveState( { candidates: currentState.candidates, selecting: false });
   } catch (e) {
     currentState.error = String(e?.message || e);
-    try { await B.saveVideoData(currentState.videoId, { selecting: false }); } catch {}
+    try { await saveState( { selecting: false }); } catch {}
     renderError(t('error_llm1'), currentState.error);
     return;
   }
@@ -630,7 +779,7 @@ function startNavWatcher() {
         // Detected a new video; reset state and restart pipeline
         try { if (buildWatchTimer) { clearInterval(buildWatchTimer); buildWatchTimer = null; } } catch {}
         try { if (selectWatchTimer) { clearInterval(selectWatchTimer); selectWatchTimer = null; } } catch {}
-        currentState = { videoId: vid, title: info.title || '', subtitlesText: null, captionLang: null, candidates: null, selected: null, cards: null, error: null };
+        currentState = { videoId: vid, sourceType: 'youtube', contentId: null, title: info.title || '', subtitlesText: null, captionLang: null, candidates: null, selected: null, cards: null, error: null };
         setStep([t('steps_extract'), t('steps_filter'), t('steps_build')], 1);
         renderProgress(t('steps_extract') + '…');
         startFlow(true);
@@ -651,8 +800,20 @@ async function ensureVideoId(timeoutMs = 3000) {
   return null;
 }
 
+// 自愈：若核心元素缺失（如 ui.html 加载失败），重建最小可用模板，避免渲染崩溃
+function ensureUIRoot() {
+  try {
+    if (uiRoot && !uiRoot.querySelector('#cc-step')) {
+      uiRoot.innerHTML = '<div class="cc-overlay"><div class="cc-modal"><div class="cc-header"><div class="cc-title">CaptiPrep</div><div class="cc-actions"><button class="cc-icon" id="cc-close" aria-label="Close" title="Close">&times;</button></div></div><div class="cc-body"><div id="cc-step"></div><div id="cc-content"></div></div></div></div>';
+      try { uiRoot.querySelector('#cc-close')?.addEventListener('click', closeModal); } catch {}
+    }
+  } catch (e) {}
+}
+
 function setStep(steps, activeIndex) {
+  ensureUIRoot();
   const stepEl = uiRoot.querySelector('#cc-step');
+  if (!stepEl) return;
   const canClickFilter = activeIndex === 3;
   const canClickBuild = activeIndex === 2 && (currentState.cards && currentState.cards.length);
   const inner = [
@@ -732,7 +893,9 @@ function hideCenterOverlay() {
 }
 
 function renderProgress(text) {
+  ensureUIRoot();
   const content = uiRoot.querySelector('#cc-content');
+  if (!content) return;
   content.innerHTML = '';
   showCenterOverlay(text);
   updateBottomControls();
@@ -740,7 +903,9 @@ function renderProgress(text) {
 
 function renderError(title, err) {
   hideCenterOverlay();
+  ensureUIRoot();
   const content = uiRoot.querySelector('#cc-content');
+  if (!content) return;
   content.innerHTML = `<div class="cc-card"><div><b>${title}</b></div><pre>${escapeHtml(err)}</pre></div>`;
   updateBottomControls();
 }
@@ -809,7 +974,7 @@ function renderSelection() {
       }
     });
     currentState.selected = selected;
-    await B.saveVideoData(currentState.videoId, { selected });
+    await saveState( { selected });
     buildCards();
   });
 }
@@ -819,18 +984,18 @@ async function buildCards() {
   renderProgress(t('progress_generating'));
   try {
     // mark background building so UI can resume progress on reopen
-    await B.saveVideoData(currentState.videoId, { building: true });
+    await saveState( { building: true });
     const context = buildContextForSelected(currentState.subtitlesText, currentState.selected, currentState.captionLang, 2);
-    const resp = await B.llmCall('second', { selected: currentState.selected, captionLang: currentState.captionLang, context });
+    const resp = await llmCallTimed('second', { selected: currentState.selected, captionLang: currentState.captionLang, context });
     currentState.cards = resp.cards || [];
     // 初次生成写入 createdAt（如果尚未存在）
-    const saved = await B.loadVideoData(currentState.videoId) || {};
+    const saved = await loadState() || {};
     const createdAt = saved.createdAt || formatDateYYYYMMDD(new Date());
-    await B.saveVideoData(currentState.videoId, { cards: currentState.cards, createdAt, building: false });
+    await saveState( { cards: currentState.cards, createdAt, building: false });
     renderLearnView();
   } catch (e) {
     currentState.error = String(e?.message || e);
-    try { await B.saveVideoData(currentState.videoId, { building: false }); } catch {}
+    try { await saveState( { building: false }); } catch {}
     renderError(t('error_llm2'), currentState.error);
   }
 }
@@ -840,7 +1005,7 @@ function startBuildWatcher() {
   buildWatchTimer = setInterval(async () => {
     if (!modalOpen) return; // if closed, we will clear on close
     try {
-      const saved = await B.loadVideoData(currentState.videoId);
+      const saved = await loadState();
       if (saved && saved.cards && saved.cards.length) {
         clearInterval(buildWatchTimer);
         buildWatchTimer = null;
@@ -857,7 +1022,7 @@ function startSelectWatcher() {
   selectWatchTimer = setInterval(async () => {
     if (!modalOpen) return;
     try {
-      const saved = await B.loadVideoData(currentState.videoId);
+      const saved = await loadState();
       if (saved && Array.isArray(saved.candidates) && saved.candidates.length) {
         clearInterval(selectWatchTimer);
         selectWatchTimer = null;
@@ -1133,7 +1298,7 @@ function bindCardSpeak(root) {
 
 async function deleteAllForThisVideo() {
   if (!currentState.videoId) return;
-  await B.saveVideoData(currentState.videoId, { subtitlesText: null, candidates: null, selected: null, cards: null, title: currentState.title });
+  await saveState( { subtitlesText: null, candidates: null, selected: null, cards: null, title: currentState.title });
   currentState = { ...currentState, subtitlesText: null, candidates: null, selected: null, cards: null };
   startFlow(true);
 }
@@ -1159,6 +1324,57 @@ async function exportCSV() {
   a.click();
   a.remove();
   URL.revokeObjectURL(url);
+}
+
+// ===== LLM 调试日志（仅计时上报，不改变任何 LLM 行为）=====
+// 在调用前后把阶段事件推给 background 统一收集；导出时从 background 取全量。
+async function llmCallTimed(role, data) {
+  const t0 = performance.now();
+  try {
+    const ev = { type: 'CC_LLM_DEBUG_EVENT', stage: 'ui.call.start', role, detail: { at: Math.round(performance.now()) } };
+    if (chrome && chrome.runtime && chrome.runtime.sendMessage) chrome.runtime.sendMessage(ev).catch(() => {});
+  } catch (e) {}
+  try {
+    const resp = await B.llmCall(role, data);
+    try {
+      const count = resp && Array.isArray(resp.items) ? resp.items.length : (resp && Array.isArray(resp.cards) ? resp.cards.length : 0);
+      const ev = { type: 'CC_LLM_DEBUG_EVENT', stage: 'ui.call.end', role, detail: { ms: Math.round(performance.now() - t0), ok: true, count } };
+      if (chrome && chrome.runtime && chrome.runtime.sendMessage) chrome.runtime.sendMessage(ev).catch(() => {});
+    } catch (e) {}
+    return resp;
+  } catch (err) {
+    try {
+      const ev = { type: 'CC_LLM_DEBUG_EVENT', stage: 'ui.call.end', role, detail: { ms: Math.round(performance.now() - t0), ok: false, err: String((err && err.message) || err) } };
+      if (chrome && chrome.runtime && chrome.runtime.sendMessage) chrome.runtime.sendMessage(ev).catch(() => {});
+    } catch (e) {}
+    throw err;
+  }
+}
+
+// 导出 LLM 调试日志为 JSON 文件（浮层 FAB 的虫形按钮触发）
+async function exportLLMDebugLog() {
+  try {
+    const resp = await chrome.runtime.sendMessage({ type: 'CC_GET_LLM_DEBUG_LOG' });
+    const log = (resp && resp.ok && Array.isArray(resp.log)) ? resp.log : [];
+    const payload = {
+      exportedAt: new Date().toISOString(),
+      app: 'CaptiPrep LLM 调试日志',
+      note: '记录 LLM 调用全链路：bg.* 为后台各环节耗时（ms），ui.* 为前端发起调用；t 为相对后台启动的毫秒时间戳，同一 seq 相邻事件的 t 差即环节耗时。',
+      log
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const d = new Date();
+    const pad = (n) => String(n).padStart(2, '0');
+    a.download = 'captiprep-llm-debug-' + d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate()) + '-' + pad(d.getHours()) + pad(d.getMinutes()) + pad(d.getSeconds()) + '.json';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 2000);
+  } catch (e) {
+    console.warn('导出 LLM 调试日志失败', e);
+  }
 }
 
 // Sample a long transcript to a target character budget by uniform line downsampling

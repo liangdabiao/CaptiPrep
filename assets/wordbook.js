@@ -43,6 +43,7 @@ function applyI18nPlaceholders(root = document) {
   });
 }
 const KEY_VIDEOS = `${CC_NS}:video:`; // prefix
+const KEY_CONTENTS = `${CC_NS}:content:`; // prefix（通用化）
 const KEY_FAV_VIDEOS = `${CC_NS}:fav:videos`;
 
 // ===== TTS: browser speech synthesis (wordbook) =====
@@ -108,6 +109,7 @@ const el = (sel) => document.querySelector(sel);
 
 const state = {
   tab: 'history',
+  srcFilter: 'all', // 通用化：来源过滤 all|youtube|article|selection|manual
   items: [], // history: [{videoId,title,createdAt,words:[...] }]
   selected: new Set(), // for videos (videoId)
   selectedWordKeys: new Set(), // for fav words (composite key)
@@ -169,6 +171,14 @@ function bindToolbar() {
   });
   el('#wb-delete').addEventListener('click', onDelete);
   el('#wb-export').addEventListener('click', onExport);
+  // 通用化：来源过滤
+  document.querySelectorAll('.wb-src button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      state.srcFilter = btn.getAttribute('data-src');
+      document.querySelectorAll('.wb-src button').forEach(b => b.classList.toggle('active', b === btn));
+      render();
+    });
+  });
 }
 
 function transitionPane(fn) {
@@ -191,16 +201,20 @@ async function loadFavs() {
 
 async function loadHistory() {
   const all = await chrome.storage.local.get(null);
-  const entries = Object.keys(all).filter(k => k.startsWith(KEY_VIDEOS));
   const out = [];
-  for (const k of entries) {
-    const data = all[k] || {};
-    if (!data.cards || !data.cards.length) continue;
-    const videoId = k.slice(KEY_VIDEOS.length);
-    const title = safeTitle(data.title) || videoId;
-    const createdAt = data.createdAt || toYYYYMMDD(new Date(data.__ts || Date.now()));
-    const words = (data.selected || data.cards || []).map(it => (it.term || it)).slice(0, 30);
-    out.push({ videoId, title, createdAt, words });
+  // video:*（旧）+ content:*（新）两套前缀统一为 item { id, key, sourceType, ... }
+  for (const prefix of [KEY_VIDEOS, KEY_CONTENTS]) {
+    const entries = Object.keys(all).filter(k => k.startsWith(prefix) && k.length > prefix.length);
+    for (const k of entries) {
+      const data = all[k] || {};
+      if (!data.cards || !data.cards.length) continue;
+      const id = k.slice(prefix.length);
+      const sourceType = prefix === KEY_VIDEOS ? 'youtube' : (data.sourceType || 'article');
+      const title = safeTitle(data.title) || id;
+      const createdAt = data.createdAt || toYYYYMMDD(new Date(data.__ts || Date.now()));
+      const words = (data.selected || data.cards || []).map(it => (it.term || it)).slice(0, 30);
+      out.push({ id, key: k, sourceType, title, createdAt, words, coverUrl: (data.meta && data.meta.coverUrl) || '' });
+    }
   }
   // group by date
   out.sort((a,b) => (a.createdAt < b.createdAt ? 1 : -1));
@@ -208,8 +222,11 @@ async function loadHistory() {
 }
 
 function currentList() {
-  if (state.tab === 'history') return state.items;
-  if (state.tab === 'favVideos') return state.items.filter(it => state.favVideos.has(it.videoId));
+  let list = state.items;
+  // 通用化：来源过滤
+  if (state.srcFilter && state.srcFilter !== 'all') list = list.filter(it => it.sourceType === state.srcFilter);
+  if (state.tab === 'history') return list;
+  if (state.tab === 'favVideos') return list.filter(it => state.favVideos.has(it.id));
   if (state.tab === 'favWords') return state.favWords; // different shape
   return [];
 }
@@ -245,7 +262,7 @@ function groupByDate(list) {
 
 function renderVideoCard(item) {
   const card = document.createElement('div'); card.className = 'wb-vcard';
-  const id = item.videoId;
+  const id = item.id || item.videoId;
   const checked = state.selected.has(id);
   const isFav = state.favVideos.has(id);
   card.classList.toggle('selected', checked);
@@ -269,7 +286,7 @@ function renderVideoCard(item) {
   `;
   // cover
   const img = card.querySelector('img');
-  setCover(img, id);
+  setCover(img, item);
   // clicks
   card.addEventListener('click', (e) => {
     const act = e.target.closest('[data-act]')?.getAttribute('data-act');
@@ -284,7 +301,7 @@ function renderVideoCard(item) {
       e.stopPropagation();
       return;
     }
-    openDetail(item.videoId, item.title);
+    openDetail(item);
   });
   return card;
 }
@@ -356,9 +373,9 @@ async function onDelete() {
   }
   const ids = Array.from(state.selected);
   if (!ids.length) return;
-  const all = await chrome.storage.local.get(null);
   for (const id of ids) {
-    const key = KEY_VIDEOS + id;
+    const item = state.items.find(x => x.id === id);
+    const key = item ? item.key : (KEY_VIDEOS + id);
     await chrome.storage.local.remove(key);
   }
   state.selected.clear();
@@ -382,7 +399,9 @@ async function onExport() {
   if (!ids.length) return;
   const all = await chrome.storage.local.get(null);
   for (const id of ids) {
-    const data = all[KEY_VIDEOS + id];
+    const item = state.items.find(x => x.id === id);
+    const key = item ? item.key : (KEY_VIDEOS + id);
+    const data = all[key];
     if (!data || !data.cards || !data.cards.length) continue;
     exportCSV(data.cards, data.title || id);
   }
@@ -401,8 +420,9 @@ function exportCSV(cards, title) {
   document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
 }
 
-async function openDetail(videoId, title) {
-  const key = KEY_VIDEOS + videoId;
+async function openDetail(item, fallbackTitle) {
+  const it = (item && typeof item === 'object') ? item : { id: item, sourceType: 'youtube', title: fallbackTitle };
+  const key = it.key || (it.sourceType === 'youtube' ? KEY_VIDEOS + it.id : KEY_CONTENTS + it.id);
   const o = await chrome.storage.local.get(key);
   const data = o[key] || {};
   const cards = data.cards || [];
@@ -414,8 +434,8 @@ async function openDetail(videoId, title) {
   if (prevBig) prevBig.remove();
   el('.wb-m-cover').style.display = '';
   grid.style.display = '';
-  el('#wb-m-title').textContent = title;
-  const img = el('#wb-m-img'); setCover(img, videoId);
+  el('#wb-m-title').textContent = it.title || fallbackTitle || it.id || '';
+  const img = el('#wb-m-img'); setCover(img, it);
   overlay.style.display = 'flex';
   grid.innerHTML = '';
   for (let i=0;i<cards.length;i++) {
@@ -425,7 +445,7 @@ async function openDetail(videoId, title) {
       <div class="cc-small">${escapeHtml(c.pos||'')}</div>
       <div>${escapeHtml(c.definition||'')}</div>`;
     card.style.cursor = 'pointer';
-    card.addEventListener('click', () => openCardModal(cards, i, { videoId, title }));
+    card.addEventListener('click', () => openCardModal(cards, i, { videoId: it.id, key, title: it.title || fallbackTitle || it.id || '' }));
     grid.appendChild(card);
   }
   bindOverlayBasicClose();
@@ -478,7 +498,7 @@ function openCardModal(cards, startIdx, ctx) {
       if (!edit) return;
       const edited = readCardEditor();
       cards[idx] = edited;
-      await saveCardsForVideo(ctx.videoId, cards);
+      await saveCardsForKey(ctx.key, cards);
       edit = false; render();
     };
     el('#wb2-save').disabled = !edit;
@@ -571,11 +591,28 @@ function openDetailWordPool(pool, current) {
   render();
 }
 
-function setCover(imgEl, videoId) {
-  const max = `https://i.ytimg.com/vi/${encodeURIComponent(videoId)}/maxresdefault.jpg`;
-  const hq = `https://i.ytimg.com/vi/${encodeURIComponent(videoId)}/hqdefault.jpg`;
-  imgEl.src = max;
-  imgEl.onerror = () => { if (imgEl.src !== hq) imgEl.src = hq; };
+function setCover(imgEl, item) {
+  const it = (item && typeof item === 'object') ? item : { id: item, sourceType: 'youtube' };
+  const id = it.id || it.videoId;
+  // 视频：ytimg 缩略图
+  if (it.sourceType === 'youtube' && id) {
+    const max = `https://i.ytimg.com/vi/${encodeURIComponent(id)}/maxresdefault.jpg`;
+    const hq = `https://i.ytimg.com/vi/${encodeURIComponent(id)}/hqdefault.jpg`;
+    imgEl.src = max;
+    imgEl.onerror = () => { if (imgEl.src !== hq) imgEl.src = hq; };
+    imgEl.style.visibility = '';
+    return;
+  }
+  // 文章：og:image 封面
+  if (it.coverUrl) {
+    imgEl.src = it.coverUrl;
+    imgEl.onerror = () => { imgEl.style.visibility = 'hidden'; };
+    imgEl.style.visibility = '';
+    return;
+  }
+  // 其他：占位（隐藏图片，显示底色）
+  imgEl.removeAttribute('src');
+  imgEl.style.visibility = 'hidden';
 }
 
 function toYYYYMMDD(d){ const y=d.getFullYear(), m=String(d.getMonth()+1).padStart(2,'0'), day=String(d.getDate()).padStart(2,'0'); return `${y}-${m}-${day}`; }
@@ -652,8 +689,7 @@ function readCardEditor(){
 }
 function escapeAttr(s){ return String(s).replace(/["&<>]/g, c => ({'"':'&quot;','&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
 
-async function saveCardsForVideo(videoId, cards){
-  const key = KEY_VIDEOS + videoId;
+async function saveCardsForKey(key, cards){
   const o = await chrome.storage.local.get(key);
   const cur = o[key] || {};
   await chrome.storage.local.set({ [key]: { ...cur, cards } });

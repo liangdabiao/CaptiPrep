@@ -105,7 +105,19 @@
   "wordbook_toolbar_export": "导出",
   "wordbook_none_fav_words": "暂无收藏单词",
   "alt_cover": "封面",
-  "export_favorites_prefix": "favorites"
-,
-  "action_speak": "朗读"
+  "export_favorites_prefix": "favorites",
+  "action_speak": "朗读",
+  "action_new_content": "新建内容",
+  "new_content_title": "新建学习内容",
+  "new_content_desc": "粘贴任意文本，即可从中生成学习卡片。",
+  "new_content_title_ph": "标题（可选）",
+  "new_content_text_ph": "在此粘贴文本…",
+  "new_content_go": "开始",
+  "new_content_empty": "请先粘贴文本。",
+  "btn_cancel": "取消",
+  "src_all": "全部",
+  "src_youtube": "视频",
+  "src_article": "文章",
+  "src_selection": "划词",
+  "src_manual": "手动"
 }

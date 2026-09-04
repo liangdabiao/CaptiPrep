@@ -50,6 +50,67 @@ async function saveVideoData(videoId, patch) {
   await chrome.storage.local.set({ [key]: next });
 }
 
+// ===== 通用内容存储（通用化：文章/划词/手动等非视频来源）=====
+// 键：CCAPTIPREPS:content:{contentId}。video:* 键保留兼容（YouTube 旧数据）。
+async function loadContentData(contentId) {
+  const key = `${window.CC_NS}:content:${contentId}`;
+  const data = await chrome.storage.local.get(key);
+  return data[key] || null;
+}
+
+async function saveContentData(contentId, patch) {
+  const key = `${window.CC_NS}:content:${contentId}`;
+  const current = await loadContentData(contentId) || {};
+  const next = { ...current, ...patch, __ts: Date.now() };
+  await chrome.storage.local.set({ [key]: next });
+}
+
+// ===== 内容源识别（通用化入口） =====
+function isYouTubePage(url) {
+  try {
+    const h = new URL(url || location.href).host;
+    return /(^|\.)youtube\.com$/i.test(h) || /(^|\.)youtu\.be$/i.test(h) || /(^|\.)youtube-nocookie\.com$/i.test(h);
+  } catch { return false; }
+}
+
+/** 识别当前页面的内容源类型：youtube | selection | article */
+function getCurrentSourceType() {
+  if (isYouTubePage(location.href)) return 'youtube';
+  try {
+    const sel = (window.getSelection ? window.getSelection().toString() : '') || '';
+    if (sel && sel.trim().length > 10) return 'selection';
+  } catch {}
+  return 'article';
+}
+
+/**
+ * 统一内容捕获（通用化）。调用 capture.js（globalThis.CC_CAPTURE）。
+ * @param {'article'|'selection'|'manual'} [sourceType] 缺省按页面自动识别
+ * @param {{text?:string,title?:string,sourceUrl?:string}} [opts]
+ */
+async function captureContent(sourceType, opts) {
+  const cc = globalThis.CC_CAPTURE;
+  if (!cc) throw new Error('capture.js not loaded');
+  const type = sourceType || (isYouTubePage(location.href) ? 'youtube' : getCurrentSourceType());
+  if (type === 'youtube') {
+    // YouTube 走原字幕管线
+    const { videoId, title } = getYouTubeVideoInfo();
+    const { text, lang } = await extractCaptionsText();
+    return {
+      id: videoId,
+      sourceType: 'youtube',
+      sourceUrl: location.href,
+      title: title || videoId,
+      text: text || '',
+      lang: lang || '',
+      meta: {},
+    };
+  }
+  const captured = cc.captureContent(type, opts);
+  return captured;
+}
+
+
 // ===== YouTube page info =====
 function getYouTubeVideoInfo() {
   const url = new URL(location.href);
@@ -442,6 +503,11 @@ async function extractCaptionsText() {
     llmCall,
     loadVideoData,
     saveVideoData,
+    loadContentData,
+    saveContentData,
+    captureContent,
+    getCurrentSourceType,
+    isYouTubePage,
     getYouTubeVideoInfo,
     extractCaptionsText,
     // Expose current selected caption track (from page context)

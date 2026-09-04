@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
- <a href="README.md">English</a> | <a href="README.zh_CN.md">简体中文</a> | <a href="README.es.md">Español</a> | <a href="README.fr.md">Français</a> | <a href="README.de.md">Deutsch</a> | <a href="README.ja.md">日本語</a> | <b>한국어</b> | <a href="README.ru.md">Русский</a>
+ <a href="README.en.md">English</a> | <a href="README.md">简体中文</a> | <a href="README.es.md">Español</a> | <a href="README.fr.md">Français</a> | <a href="README.de.md">Deutsch</a> | <a href="README.ja.md">日本語</a> | <b>한국어</b> | <a href="README.ru.md">Русский</a>
 </p>
 
 <p align="center"><em>YouTube 자막에서 먼저 핵심 어휘를 익히고, 그다음 영상으로 맥락 학습을 강화하세요.</em></p>

@@ -23,6 +23,11 @@
     .wb-title { font-weight:800; letter-spacing:.4px; font-size:18px; position:absolute; left:50%; transform: translateX(-50%); text-align:center; }
     .wb-actions { display:flex; gap:8px; }
 
+    /* 通用化：来源过滤 */
+    .wb-src { display:flex; gap:6px; margin-right:auto; flex-wrap:wrap; }
+    .wb-src button { font-size:12px; padding:6px 10px; }
+    .wb-src .active { background:#000; color:#fff; }
+
     .wb-content { flex:1; overflow:auto; padding:16px; }
     .wb-section { margin-bottom:18px; }
     .wb-date { font-weight:800; margin:8px 0; opacity:.8; }
@@ -88,6 +93,13 @@
     </div>
     <div class="wb-right">
       <div class="wb-toolbar">
+        <div class="wb-src">
+          <button class="cc-btn-white active" data-src="all">__MSG_src_all__</button>
+          <button class="cc-btn-white" data-src="youtube">__MSG_src_youtube__</button>
+          <button class="cc-btn-white" data-src="article">__MSG_src_article__</button>
+          <button class="cc-btn-white" data-src="selection">__MSG_src_selection__</button>
+          <button class="cc-btn-white" data-src="manual">__MSG_src_manual__</button>
+        </div>
         <div class="wb-title" id="wb-current-title">__MSG_wordbook_nav_history__</div>
         <div class="wb-actions">
           <button class="cc-btn-white" id="wb-select-all">__MSG_wordbook_toolbar_select_all__</button>

@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
- <a href="README.md">English</a> | <a href="README.zh_CN.md">简体中文</a> | <a href="README.es.md">Español</a> | <a href="README.fr.md">Français</a> | <a href="README.de.md">Deutsch</a> | <b>日本語</b> | <a href="README.ko.md">한국어</a> | <a href="README.ru.md">Русский</a>
+ <a href="README.en.md">English</a> | <a href="README.md">简体中文</a> | <a href="README.es.md">Español</a> | <a href="README.fr.md">Français</a> | <a href="README.de.md">Deutsch</a> | <b>日本語</b> | <a href="README.ko.md">한국어</a> | <a href="README.ru.md">Русский</a>
 </p>
 
 <p align="center"><em>YouTube の字幕から重要語を事前キャッチ。理解の地盤をつくってから動画を観る新しい学習フロー。</em></p>

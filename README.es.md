@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
- <a href="README.md">English</a> | <a href="README.zh_CN.md">简体中文</a> | <b>Español</b> | <a href="README.fr.md">Français</a> | <a href="README.de.md">Deutsch</a> | <a href="README.ja.md">日本語</a> | <a href="README.ko.md">한국어</a> | <a href="README.ru.md">Русский</a>
+ <a href="README.en.md">English</a> | <a href="README.md">简体中文</a> | <b>Español</b> | <a href="README.fr.md">Français</a> | <a href="README.de.md">Deutsch</a> | <a href="README.ja.md">日本語</a> | <a href="README.ko.md">한국어</a> | <a href="README.ru.md">Русский</a>
 </p>
 
 <p align="center"><em>Explora primero el vocabulario clave de un vídeo de YouTube; luego míralo entendiendo el contexto y reteniendo más.</em></p>

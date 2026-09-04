@@ -152,9 +152,31 @@ chrome.action.onClicked.addListener(async (tab) => {
   }
 });
 
+// ===== LLM 调试日志（仅记录调用过程，不改变任何 LLM 行为）=====
+const LLM_DEBUG_LOG = [];
+const LLM_DEBUG_MAX = 800;
+const LLM_DEBUG_STORAGE_KEY = 'CCAPTIPREPS:llmDebugLog';
+let LLM_DEBUG_WRITE_Q = Promise.resolve();
+let LLM_DEBUG_SEQ = 0;
+function llmLog(stage, role, detail) {
+  try {
+    const ev = { seq: ++LLM_DEBUG_SEQ, ts: new Date().toISOString(), t: Math.round(performance.now()), stage, role: role || '', detail: detail || {} };
+    LLM_DEBUG_LOG.push(ev);
+    if (LLM_DEBUG_LOG.length > LLM_DEBUG_MAX) LLM_DEBUG_LOG.shift();
+    // 持久化到 storage（串行写队列，保证顺序）：MV3 service worker 会休眠重启，内存日志会丢，必须落盘
+    LLM_DEBUG_WRITE_Q = LLM_DEBUG_WRITE_Q.then(() => chrome.storage.local.get(LLM_DEBUG_STORAGE_KEY)).then((r) => {
+      const arr = (r && r[LLM_DEBUG_STORAGE_KEY]) || [];
+      arr.push(ev);
+      if (arr.length > LLM_DEBUG_MAX) arr.splice(0, arr.length - LLM_DEBUG_MAX);
+      return chrome.storage.local.set({ [LLM_DEBUG_STORAGE_KEY]: arr });
+    }).catch(() => {});
+  } catch (e) {}
+}
+
 // Generic LLM call routing
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg && msg.type === 'CC_LLM_CALL') {
+    llmLog('bg.recv', msg.payload && msg.payload.role, { dataKeys: msg.payload && msg.payload.data ? Object.keys(msg.payload.data) : [] });
     (async () => {
       try {
         const result = await handleLLMCall(msg.payload);
@@ -165,6 +187,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     })();
     return true; // keep channel open for async
   }
+  if (msg && msg.type === 'CC_GET_LLM_DEBUG_LOG') {
+    (async () => {
+      try {
+        const r = await chrome.storage.local.get(LLM_DEBUG_STORAGE_KEY);
+        sendResponse({ ok: true, log: (r && r[LLM_DEBUG_STORAGE_KEY]) || [] });
+      } catch (e) { sendResponse({ ok: true, log: [] }); }
+    })();
+    return true;
+  }
+  if (msg && msg.type === 'CC_CLEAR_LLM_DEBUG_LOG') {
+    (async () => { try { await chrome.storage.local.remove(LLM_DEBUG_STORAGE_KEY); } catch (e) {} LLM_DEBUG_LOG.length = 0; sendResponse({ ok: true }); })();
+    return true;
+  }
+  if (msg && msg.type === 'CC_LLM_DEBUG_EVENT') { llmLog(msg.stage, msg.role, msg.detail || {}); sendResponse({ ok: true }); return; }
   if (msg && msg.type === 'CC_OPEN_OPTIONS') {
     chrome.runtime.openOptionsPage(() => {
       if (chrome.runtime.lastError) {
@@ -253,18 +289,27 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
 async function handleLLMCall(payload) {
   const settings = await getSettings();
+  const t0 = performance.now();
   const { role, data } = payload; // role: 'first'|'second'
+  llmLog('bg.handle.start', role, {
+    subLen: data && typeof data.subtitlesText === 'string' ? data.subtitlesText.length : undefined,
+    contextLen: data && data.context ? JSON.stringify(data.context).length : undefined,
+    selectedN: Array.isArray(data && data.selected) ? data.selected.length : undefined,
+    maxItems: data && data.maxItems,
+  });
 
   const { provider, baseUrl, apiKey, accent } = settings;
   const glossLang = resolveGlossLang(settings.glossLang, settings.uiLang);
   if (!apiKey) throw new Error('Missing API key in settings');
 
   const prompts = buildPrompts(role, data, { accent, glossLang });
+  llmLog('bg.prompt', role, { promptLen: prompts && prompts.prompt ? prompts.prompt.length : 0 });
 
   // Choose model per role with fallback
   const model = role === 'first'
     ? (settings.modelFirst || settings.model)
     : (settings.modelSecond || settings.model);
+  llmLog('bg.model', role, { provider: settings.provider, model, modelFirst: settings.modelFirst || '', modelSecond: settings.modelSecond || '', baseUrl: (settings.baseUrl || '').slice(0, 40) });
 
   // Sampling per role
   // Lower temperature to reduce hallucination in definition/example stage
@@ -277,16 +322,21 @@ async function handleLLMCall(payload) {
   let text = '';
   let parsed = null;
   for (let attempt = 0; attempt < 2; attempt++) {
+    const a0 = performance.now();
+    llmLog('bg.provider.start', role, { attempt, model, maxTokens: attempt === 0 ? baseMaxTokens : undefined });
     text = await callProvider({ provider, baseUrl, apiKey, model, prompt: prompts.prompt, temperature, topP, maxTokens: attempt === 0 ? baseMaxTokens : undefined });
+    llmLog('bg.provider.end', role, { attempt, ms: Math.round(performance.now() - a0), outLen: text ? String(text).length : 0 });
     if (!text || !String(text).trim()) continue; // empty -> retry
     try {
       parsed = JSON.parse(extractJson(text));
       break;
     } catch (e) {
+      llmLog('bg.parse.fail', role, { attempt, textLen: text ? String(text).length : 0 });
       if (attempt === 0) continue; // invalid JSON -> retry once with relaxed cap
     }
   }
   if (!parsed) {
+    llmLog('bg.handle.end', role, { totalMs: Math.round(performance.now() - t0), ok: false, err: text ? 'invalid-json' : 'empty' });
     if (!text || !String(text).trim()) {
       throw new Error('LLM returned empty content. Check your API key, model and quota (retried once).');
     }
@@ -309,6 +359,7 @@ async function handleLLMCall(payload) {
       // best-effort; ignore
     }
   }
+  llmLog('bg.handle.end', role, { totalMs: Math.round(performance.now() - t0), ok: true, resultCount: parsed && parsed.items ? parsed.items.length : (parsed && parsed.cards ? parsed.cards.length : 0) });
   return parsed;
 }
 
@@ -879,7 +930,9 @@ async function callProvider({ provider, baseUrl, apiKey, model, prompt, temperat
         ],
         temperature: typeof temperature === 'number' ? temperature : undefined,
         top_p: typeof topP === 'number' ? topP : undefined,
-        max_tokens: typeof maxTokens === 'number' ? maxTokens : undefined
+        max_tokens: typeof maxTokens === 'number' ? maxTokens : undefined,
+        // DeepSeek V4 默认开启 thinking（思考模式）导致变慢，这里对 deepseek 模型显式关闭
+        ...(model.toLowerCase().includes('deepseek') ? { thinking: { type: 'disabled' } } : {})
       })
     });
     if (!res.ok) throw new Error(`OpenAI error ${res.status}: ${await res.text()}`);
@@ -1041,3 +1094,101 @@ function extractJson(text) {
 function truncate(s, n) {
   return s.length > n ? s.slice(0, n) + '…' : s;
 }
+
+// ===== 通用化：内容源迁移（video:* → content:*）+ meta 索引 =====
+const BG_NS = 'CCAPTIPREPS';
+const BG_META_INDEX = BG_NS + ':meta:index';
+
+/** 一次性迁移旧 video:* 数据到 content:*，并维护内容索引（幂等，可反复执行） */
+async function migrateLegacyVideoKeys() {
+  try {
+    const all = await chrome.storage.local.get(null);
+    const prefix = BG_NS + ':video:';
+    const keys = Object.keys(all || {}).filter((k) => k.startsWith(prefix) && k.length > prefix.length);
+    const indexAdd = {};
+    let changed = false;
+    for (const k of keys) {
+      const videoId = k.slice(prefix.length);
+      if (!videoId || videoId === 'null' || videoId === 'undefined') continue;
+      const data = all[k] || {};
+      if (!data.cards && !data.subtitlesText) continue; // 跳过空记录
+      const contentKey = BG_NS + ':content:' + videoId;
+      const existing = await chrome.storage.local.get(contentKey);
+      if (existing[contentKey]) continue; // 已迁移
+      const next = Object.assign({}, data, { sourceType: 'youtube', __ts: data.__ts || data.createdAt || Date.now() });
+      await chrome.storage.local.set({ [contentKey]: next });
+      indexAdd[videoId] = { sourceType: 'youtube', title: data.title || videoId, updatedAt: next.__ts };
+      changed = true;
+    }
+    if (Object.keys(indexAdd).length) {
+      const prev = await chrome.storage.local.get(BG_META_INDEX);
+      const merged = Object.assign({}, (prev[BG_META_INDEX] || {}), indexAdd);
+      await chrome.storage.local.set({ [BG_META_INDEX]: merged });
+    }
+    if (changed) console.log('[CaptiPrep] migrated legacy video:* keys to content:*');
+  } catch (e) { console.warn('[CaptiPrep] migration failed', e); }
+}
+
+// 迁移挂载（新增 listener，不动已有 onInstalled/onStartup）
+try { chrome.runtime.onInstalled.addListener(() => { try { migrateLegacyVideoKeys(); } catch {} }); } catch {}
+try { chrome.runtime.onStartup.addListener(() => { try { migrateLegacyVideoKeys(); } catch {} }); } catch {}
+
+// ===== 通用化：右键菜单 + 图标点击 → 按需注入 =====
+function bgIsYouTubeUrl(url) {
+  try {
+    const h = new URL(url || '').host;
+    return /(^|\.)youtube\.com$/i.test(h) || /(^|\.)youtu\.be$/i.test(h) || /(^|\.)youtube-nocookie\.com$/i.test(h);
+  } catch { return false; }
+}
+
+function createContextMenus() {
+  try {
+    if (!chrome.contextMenus) return;
+    chrome.contextMenus.removeAll(() => {
+      chrome.contextMenus.create({
+        id: 'cc-learn-page',
+        title: '用 CaptiPrep 学习本页',
+        contexts: ['page', 'selection'],
+      });
+    });
+  } catch (e) {}
+}
+try { chrome.runtime.onInstalled.addListener(() => { try { createContextMenus(); } catch {} }); } catch {}
+try { chrome.runtime.onStartup.addListener(() => { try { createContextMenus(); } catch {} }); } catch {}
+
+/** 动态注入脚本（非 YouTube 页面）并通知 UI 打开对应来源流程 */
+async function injectAndOpen(tabId, sourceType) {
+  // 已注入：直接通知
+  try {
+    await chrome.tabs.sendMessage(tabId, { type: 'CC_OPEN_MODAL', payload: { sourceType } });
+    return;
+  } catch (e) {}
+  // 未注入：executeScript 注入（activeTab 授权）
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: ['assets/capture.js', 'content.js', 'assets/tts.js', 'ui.js'],
+    });
+    await chrome.tabs.sendMessage(tabId, { type: 'CC_OPEN_MODAL', payload: { sourceType } });
+  } catch (e2) {
+    console.warn('[CaptiPrep] injectAndOpen failed', e2);
+  }
+}
+
+try {
+  chrome.contextMenus.onClicked.addListener(async (info, tab) => {
+    if (!info || info.menuItemId !== 'cc-learn-page' || !tab || tab.id == null) return;
+    const sel = (info.selectionText || '').trim();
+    const sourceType = (sel.length > 10) ? 'selection' : (bgIsYouTubeUrl(tab.url) ? 'youtube' : 'article');
+    await injectAndOpen(tab.id, sourceType);
+  });
+} catch {}
+
+try {
+  chrome.action.onClicked.addListener(async (tab) => {
+    if (!tab || tab.id == null) return;
+    const sourceType = bgIsYouTubeUrl(tab.url) ? 'youtube' : 'article';
+    await injectAndOpen(tab.id, sourceType);
+  });
+} catch {}
+

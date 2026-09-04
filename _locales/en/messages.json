@@ -322,5 +322,44 @@
   },
   "action_speak": {
     "message": "Speak"
+  },
+  "action_new_content": {
+    "message": "New content"
+  },
+  "new_content_title": {
+    "message": "New learning content"
+  },
+  "new_content_desc": {
+    "message": "Paste any text below to create study cards from it."
+  },
+  "new_content_title_ph": {
+    "message": "Title (optional)"
+  },
+  "new_content_text_ph": {
+    "message": "Paste text here…"
+  },
+  "new_content_go": {
+    "message": "Start"
+  },
+  "new_content_empty": {
+    "message": "Please paste some text first."
+  },
+  "btn_cancel": {
+    "message": "Cancel"
+  },
+  "src_all": {
+    "message": "All"
+  },
+  "src_youtube": {
+    "message": "Video"
+  },
+  "src_article": {
+    "message": "Article"
+  },
+  "src_selection": {
+    "message": "Selection"
+  },
+  "src_manual": {
+    "message": "Manual"
   }
 }
